@@ -5,7 +5,7 @@ include("NLEVP.jl")
 include("Helmholtz.jl")
 include("APE.jl")
 include("network.jl")
-include("resolvent.jl)
+include("Resolvent/resolvent.jl)
 
 #using .Meshutils
 #using .resolvent
