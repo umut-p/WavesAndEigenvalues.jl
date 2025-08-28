@@ -7,7 +7,7 @@ using WavesAndEigenvalues
 using WavesAndEigenvalues.Helmholtz
 
 # ===============================
-# Compute the resolvent operator
+# Compute the resolvent operator – Computes the resolvent operator and solves the NLEVP.
 # ===============================
 function compute_resolvent(L, M, ω)
     # Solve the nonlinear eigenvalue problem
@@ -20,7 +20,7 @@ function compute_resolvent(L, M, ω)
 end
 
 # ===============================
-# Estimate the resolvent norm
+# Estimate the resolvent norm - Estimates amplification potential.
 # ===============================
 function resolvent_norm(R)
     svals = svdvals(R)
@@ -28,7 +28,7 @@ function resolvent_norm(R)
 end
 
 # ===============================
-# Perform singular value decomposition
+# Perform singular value decomposition - Computes input-output structures via SVD.
 # ===============================
 function resolvent_svd(R)
     U, S, V = svd(R)
@@ -36,7 +36,7 @@ function resolvent_svd(R)
 end
 
 # ===============================
-# Define linear operator family
+# Define linear operator family - Wraps L and M into LinearOperators.
 # ===============================
 function linear_operator_family(L, M, ω)
     L_family = LinearOperator(size(L)..., false) do x
@@ -49,7 +49,7 @@ function linear_operator_family(L, M, ω)
 end
 
 # ===============================
-# MSLP iteration for eigenvalues
+# MSLP iteration for eigenvalues - Finds eigenvalues/eigenvectors using MSLP.
 # ===============================
 function mslp_iteration(L, M, ω)
     nlevp = NLEVP(L, M, ω)
@@ -58,7 +58,7 @@ function mslp_iteration(L, M, ω)
 end
 
 # ===============================
-# Objective function for optimal forcing
+# Objective function for optimal forcing - Identify optimal forcing to minimize J(v,f)
 # ===============================
 function objective_function(f, L, M, ω)
     R, _, _ = compute_resolvent(L, M, ω)
@@ -74,7 +74,7 @@ function optimize_forcing(L, M, ω)
 end
 
 # ===============================
-# Helmholtz resolvent integration
+# Helmholtz resolvent integration - Computes resolvent for a Helmholtz-discretized system.
 # ===============================
 function helmholtz_resolvent(mesh, ω; order=:lin)
     L, M = discretize(mesh, order=order)
