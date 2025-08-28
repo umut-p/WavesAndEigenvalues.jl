@@ -5,7 +5,7 @@ module Resolvent
 
 
 using SparseArrays
-using WavesAndEigenvalues.NVLEP
+using WavesAndEigenvalues.NLEVP
 using WavesAndEigenvalues.Helmholtz
 
 
