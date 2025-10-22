@@ -1,85 +1,121 @@
 module Resolvent
 
 using LinearAlgebra
-using Optim
-using LinearOperators
-using WavesAndEigenvalues
-using WavesAndEigenvalues.Helmholtz
+using IterativeSolvers
+using LinearMaps
 
-# ===============================
-# Compute the resolvent operator – Computes the resolvent operator and solves the NLEVP.
-# ===============================
-function compute_resolvent(L, M, ω)
-    # Solve the nonlinear eigenvalue problem
-    nlevp = NLEVP(L, M, ω)
-    Ω, P = solve(nlevp)
+# Resolvent Analysis at a given frequency
 
-    # Compute the resolvent operator
-    R = inv(L - ω^2 * M)
-    return R, Ω, P
-end
+"""
+    resolvent_solve(L, ω0, F; tol=1e-8, maxiter=200, output=true)
 
-# ===============================
-# Estimate the resolvent norm - Estimates amplification potential.
-# ===============================
-function resolvent_norm(R)
-    svals = svdvals(R)
-    return maximum(svals)
-end
+Solve the resolvent problem for a given frequency ω₀ and forcing vector F̂:
+    L(ω₀) * p̂ = F̂
+Returns the response vector p̂.
 
-# ===============================
-# Perform singular value decomposition - Computes input-output structures via SVD.
-# ===============================
-function resolvent_svd(R)
-    U, S, V = svd(R)
-    return U, S, V
-end
+"""
+function compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
+    A = L(ω0)
 
-# ===============================
-# Define linear operator family - Wraps L and M into LinearOperators.
-# ===============================
-function linear_operator_family(L, M, ω)
-    L_family = LinearOperator(size(L)..., false) do x
-        return L*x - ω^2*M*x
+    p̂ = nothing
+    success = false
+    resid = NaN
+
+    try
+        p̂ = A \ F
+        success = true
+        resid = norm(A * p̂ - F)
+    catch
+        if output
+            @warn "Direct solve failed; trying GMRES"
+        end
+        try
+            Amap = LinearMap(x -> A * x, size(A)...)
+            p̂ = gmres(Amap, F; tol=tol, maxiter=maxiter, log=true)
+            success = true
+            resid = norm(A * p̂ - F)
+        catch err
+            error("Resolvent solve failed: both direct and GMRES solvers failed. Error: $err")
+        end
     end
-    M_family = LinearOperator(size(M)..., false) do x
-        return M*x
+
+    return p̂, (success=success, resid=resid, ω0=ω0)
+end
+"""
+  resolvent_gain(L, ω0, F; kwargs...)
+
+Compute the resolvent gain G = ||p̂|| / ||F̂|| for the operator L(ω₀).
+
+Returns (p̂, gain, info).
+"""
+function resolvent_gain(L, ω0, F; kwargs...)
+    A = L(ω0)  # Directly evaluate the operator at ω₀
+    p̂, info = compute_resolvent(L, ω0, F; kwargs...)
+    gain = norm(p̂) / norm(F)
+    return p̂, gain, info
+end
+"""
+# ---------------------------------------------------------------
+Estimating the resolvent norm (largest singular value)
+# ---------------------------------------------------------------
+
+  resolvent_norm(L, ω0)
+
+Estimate the resolvent norm ‖(L(ω₀))⁻¹‖₂
+
+This computes the largest singular value of (L(ω₀))⁻¹, by solving an eigenvalue problem on (A' * A)⁻¹.
+"""
+
+function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
+    A = L(ω0)
+    n = size(A, 1)
+    x = randn(ComplexF64, n)
+    x /= norm(x)
+
+    σ_prev = 0.0
+    σ = 0.0
+
+    for i in 1:maxiter
+        # Solve A * z = x
+        z = try
+            A \ x
+        catch
+            @warn "Inverse solve failed at iteration $i"
+            return NaN
+        end
+
+        σ = norm(z)
+        x = z / σ
+
+        if abs(σ - σ_prev) < tol
+            break
+        end
+        σ_prev = σ
     end
-    return L_family, M_family
+
+    return σ
 end
 
-# ===============================
-# MSLP iteration for eigenvalues - Finds eigenvalues/eigenvectors using MSLP.
-# ===============================
-function mslp_iteration(L, M, ω)
-    nlevp = NLEVP(L, M, ω)
-    Ω, P = mslp(nlevp)
-    return Ω, P
-end
+"""
+    point_force(mesh, xref; amp=1.0)
 
-# ===============================
-# Objective function for optimal forcing - Identify optimal forcing to minimize J(v,f)
-# ===============================
-function objective_function(f, L, M, ω)
-    R, _, _ = compute_resolvent(L, M, ω)
-    v = R * f
-    J = norm(v) + norm(f)
-    return J
-end
+Generate a forcing vector F̂ applied at the node nearest to the physical position `xref`.
+Uses the `points` field of the mesh for coordinates.
+"""
 
-function optimize_forcing(L, M, ω)
-    f0 = zeros(size(L, 1))
-    result = optimize(f -> objective_function(f, L, M, ω), f0, BFGS())
-    return result.minimizer
-end
+function point_force(mesh, xref; amp=1.0)
+    coords = mesh.points  
 
-# ===============================
-# Helmholtz resolvent integration - Computes resolvent for a Helmholtz-discretized system.
-# ===============================
-function helmholtz_resolvent(mesh, ω; order=:lin)
-    L, M = discretize(mesh, order=order)
-    R, _, _ = compute_resolvent(L, M, ω)
-    return R
-end
+    # Handle 3×N layout (common in Helmholtz meshes)
+    coords = size(coords, 1) == 3 ? permutedims(coords) : coords  # ensure N×3
 
-end # module Resolvent
+    # Find nearest node
+    dists = [sum(abs2, coords[i, :] .- xref) for i in 1:size(coords, 1)]
+    idx = argmin(dists)
+
+    # Create complex forcing vector
+    F = zeros(ComplexF64, size(coords, 1))
+    F[idx] = amp + 0im
+
+    return F
+end
