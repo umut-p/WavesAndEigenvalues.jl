@@ -1,13 +1,12 @@
 module Resolvent
 
-using LinearAlgebra
-using IterativeSolvers
-using LinearMaps
+include("Utils.jl")
+# using LinearAlgebra, IterativeSolvers, LinearMaps
 
 # Resolvent Analysis at a given frequency
 
 """
-    resolvent_solve(L, ω0, F; tol=1e-8, maxiter=200, output=true)
+    compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
 
 Solve the resolvent problem for a given frequency ω₀ and forcing vector F̂:
     L(ω₀) * p̂ = F̂
@@ -42,6 +41,7 @@ function compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
 
     return p̂, (success=success, resid=resid, ω0=ω0)
 end
+
 # ---------------------------------------------------------------
 Estimating the resolvent norm (largest singular value)
 # ---------------------------------------------------------------
@@ -53,7 +53,7 @@ Estimate the resolvent norm ‖(L(ω₀))⁻¹‖₂ (the maximum amplification 
 
 This computes the largest singular value of (L(ω₀))⁻¹, by solving an eigenvalue problem on (A' * A)⁻¹.
 It measures how strongly the system amplifies input at a given frequency 𝜔₀.
-A high-resolvent norm at a frequency means the system is very sensitive to forcing at that frequency — a remark of potential resonance or instability.
+A high-resolvent norm at a frequency means the system is susceptible to forcing at that frequency — a remark of potential resonance or instability.
 """
 
 function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
@@ -159,4 +159,5 @@ function point_force(fine_mesh, xref; amp=1.0)
     F[idx] = amp + 0im      # Sets the entry at the nearest node to the complex amplitude amp + 0im
 
     return F
+end
 end
