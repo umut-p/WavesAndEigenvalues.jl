@@ -3,7 +3,10 @@ module Resolvent
 include("Utils.jl")
 # using LinearAlgebra, IterativeSolvers, LinearMaps
 
-# Resolvent Analysis at a given frequency
+
+#------------------------------------------------------------------
+# Resolvent Analysis at a given frequency and forcing vector
+#------------------------------------------------------------------
 
 """
     compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
@@ -30,8 +33,8 @@ function compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
             @warn "Direct solve failed; trying GMRES"
         end
         try
-            Amap = LinearMap(x -> A * x, size(A)...)    # GMRES-compatible linear map which wraps the matrix-vector product A ⋅ x
-            p̂, _ = gmres(Amap, F; tol=tol, maxiter=maxiter, log=true)   # Solve using GMRES method
+            Amap = LinearMap(x -> A * x, size(A),n,n)    # GMRES-compatible linear map which wraps the matrix-vector product Amap = A ⋅ x 
+            p̂, _ = gmres(Amap, F; tol=tol, maxiter=maxiter, log=true)   # Solve using the GMRES method; information about the iterative solve process is ignored
             success = true    # GMRES solve succeeded
             resid = norm(A * p̂ - F)    # Compute residual norm
         catch err
@@ -59,8 +62,8 @@ A high-resolvent norm at a frequency means the system is susceptible to forcing 
 function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
     A = L(ω0)    # Resolvent operator at frequency ω₀
     n = size(A, 1)    # Dimension of the operator
-    x = randn(ComplexF64, n)   # Generates a random complex vector 𝑥 of length n
-    x /= norm(x)     # Normalizes 𝑥 to have unit norm
+    x = randn(ComplexF64, n)   # Generates a random complex vector x of length n
+    x /= norm(x)     # Normalizes x to have unit norm
 
     σ_prev = 0.0
     σ = 0.0
@@ -69,7 +72,7 @@ function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
     for i in 1:maxiter
         # Solve A ⋅ z = x
         z = try
-            A \ x        # Inverse solve to get z = A⁻¹ * x
+            A \ x    # Inverse solve to get z = A⁻¹ * x
         catch
             @warn "Inverse solve failed at iteration $i"
             return NaN
@@ -78,7 +81,7 @@ function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
         σ = norm(z)      # Estimate singular value σ = ||z|| = ||A⁻¹ * x||
         x = z / σ        # Normalize z to get new x
 
-        if abs(σ - σ_prev) < tol    # Convergence check
+        if abs(σ - σ_prev) < tol    # Convergence check, if less than tolerance then stop
             break
         end
         σ_prev = σ
@@ -105,18 +108,17 @@ function resolvent_svd(L, ω0; k=5, output=true)
     A = L(ω0) # Resolvent operator at frequency ω₀
     n = size(A, 1) # Dimension of the operator (number of rows in the matrix A)
 
-    # Define matrix-free resolvent operator R ≈ A⁻¹
+    # Define matrix-free resolvent operator R ≈ A⁻¹x
     Rmap = LinearMap(x -> A \ x, n, n)
 
     # Generate a random input matrix for the SVD of size n × k
     X = randn(ComplexF64, n, k)
 
     # Apply Rmap to each column of X
-    Y = similar(X) # Allocates a matrix Y of the same size and type as X (stores the system responses to each input)
+    Y = similar(X)     # Allocates a matrix Y of the same size and type as X (stores the system responses to each input)
     for j in 1:k 
-        Y[:, j] = Rmap * X[:, j] # For each column 𝑗, apply the resolvent operator 𝑅=𝐴^(-1) to the input vector X[:, j]
-                                 # Store the response in 𝑦_j = 𝐴^(-1)𝑥_j
-    end
+        Y[:, j] = Rmap * X[:, j] # For each column 𝑗, apply the resolvent operator 𝑅=A⁻¹ to the input vector X[:, j] and store the response in y_j = A⁻¹x_j
+end
     # Perform SVD on the response matrix Y
     SVD = svd(Y)  # Computes the dominant response directions, "the most amplified input-output pairs".
     U = SVD.U
@@ -144,11 +146,11 @@ Generate a forcing vector F̂ applied at the node nearest to the physical positi
 Uses the `points` field of the mesh for coordinates.
 """
 
-function point_force(fine_mesh, xref; amp=1.0)
-    coords = fine_mesh.points  # get coordinates of all mesh nodes. Could be 3×N or N×3 
+function point_force(mesh, xref; amp=1.0)
+    coords = mesh.points  # get coordinates of all mesh nodes. Could be 3×N or N×3 
 
     # Handle 3×N layout (common in Helmholtz meshes)
-    coords = size(coords, 1) == 3 ? permutedims(coords) : coords  # ensuring that matrix is N×3
+    coords = size(coords, 1) == 3 ? permutedims(coords) : coords  # ensuring that matrix is N×3, permutedims = Transpose of the matrix coords
 
     # Find nearest node
     dists = [sum(abs2, coords[i, :] .- xref) for i in 1:size(coords, 1)]   # dists: Computes squared Euclidean distance from each node to xref
