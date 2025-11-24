@@ -729,10 +729,6 @@ function polyval(p,z::Number)
   return f
 end
 
-
-
-
-
 function estimate_pol(ω::Array{Complex{Float64},1})
   N=length(ω)
   Δε=zeros(ComplexF64,N-2)
@@ -764,3 +760,149 @@ function conv_radius(sol::Solution,param::Symbol)
   pade_symbol=Symbol("$(string(param))/Taylor")
   return conv_radius(sol.eigval_pert[pade_symbol])
 end
+# ---------------------------------------------------------------
+# Resolvent Analysis Functions
+# ---------------------------------------------------------------       
+"""
+    compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
+
+Solve the resolvent problem for a given frequency ω₀ and forcing vector F̂:
+    L(ω₀) * p̂ = F̂
+Returns the response vector.  p̂ = L(ω₀)^(-1) * F̂
+"""
+function compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
+    A = L(ω0) # Resolvent operator at frequency ω₀
+    p̂ = nothing # Initialize response vector
+    success = false # Flag for successful solve
+    resid = NaN # Residual norm
+
+    # First try direct solve
+    try
+        p̂ = A \ F # Direct solve ̂p = L(ω)^(-1) * F
+        success = true # Direct solve succeeded
+        resid = norm(A * p̂ - F) # Compute residual norm
+    catch err_direct
+        if output
+            @warn "Direct solve failed. Error: $err_direct"
+        end
+    end
+    return p̂, (success=success, resid=resid, ω0=ω0)
+end
+
+# ---------------------------------------------------------------
+# Estimate resolvent norm (largest singular value)
+# ---------------------------------------------------------------
+"""
+    resolvent_norm(L, ω0)
+
+Estimate the resolvent norm ‖(L(ω₀))⁻¹‖₂ (the maximum amplification the system can produce in response to any unit input) using the power method.
+
+This computes the largest singular value of (L(ω₀))⁻¹, by solving an eigenvalue problem on (L(ω₀)' * L(ω₀))⁻¹.
+It measures how strongly the system amplifies the input at a given frequency 𝜔₀.
+A high resolvent norm at a given frequency means the system is very sensitive to the forcing at that frequency —
+a remark of potential resonance or instability.
+"""
+
+function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
+    A = L(ω0) # Resolvent operator at frequency ω₀
+    n = size(A, 1) # Dimension of the operator
+    x = randn(ComplexF64, n) # Generates a random complex vector 𝑥 of length n
+    x /= norm(x) # Normalizes 𝑥 to have unit norm
+
+    σ_prev = 0.0
+    σ = 0.0
+
+# Power iteration
+    for i in 1:maxiter
+        # Solve L(ω₀) ⋅ z = x
+        z = nothing
+        try
+            z = A \ x # Inverse solve to get z = L(ω₀)⁻¹ * x
+        catch
+            @warn "Inverse solve failed at iteration $i"
+            return NaN
+        end
+
+        σ = norm(z) # Estimate singular value σ = ||z|| = ||A⁻¹ * x||
+        if σ < eps()
+            return NaN
+        end
+
+        x = z / σ # Normalize z to get new x
+        if abs(σ - σ_prev) < tol # Convergence check, if change in σ is below tolerance then stop
+            break
+        end
+        σ_prev = σ # Update previous σ for next iteration
+    end
+
+    return σ # Return estimated resolvent norm
+end
+
+# ---------------------------------------------------------------
+# Compute the singular values
+# ---------------------------------------------------------------
+"""
+resolvent_svd(L, ω0; k=5, output=true)
+
+Compute the leading k singular values and vectors of the resolvent operator L(ω₀)⁻¹.
+It identifies the most amplified input-output directions in a system at frequency ω₀.
+
+Returns (U, Σ, V), where:
+- U: matrix of left singular vectors (response modes)
+- Σ: vector of singular values (amplification factors)
+- V: matrix of right singular vectors (forcing modes)
+
+Arguments:
+- L: function or operator returning Helmholtz matrix at frequency ω
+- ω0: frequency (rad/s)
+- Random forcing vectors are generated.
+- k: number of singular values/vectors to return (ignored if X is given with fewer columns)
+- output: print singular values
+"""
+function resolvent_svd(L, ω0; k=5, output=true)
+    A = L(ω0)                  # Resolvent operator at frequency ω₀
+    n = size(A,1)          # Dimensions of the operator L(ω₀)
+
+    # Generate random input matrix
+    X = randn(ComplexF64, n, k) # Random complex forcing vectors
+    
+    # Apply resolvent to each column of X
+    Y = zeros(ComplexF64, n, k) # Initialize response matrix
+    for j in 1:k 
+        Y[:, j] = A \ X[:, j] # Compute response for each forcing vector
+    end
+
+    # Perform SVD on response matrix
+    SVD = svd(Y) # SVD decomposition of response matrix Y
+    U, S, V = SVD.U, SVD.S, SVD.V # Extract U, S, V from SVD
+
+    if output
+        println("→ Top $k singular values of resolvent operator at $(ω0 / (2π)) Hz:")
+        for i in 1:k
+            println("   σ[$i] ≈ ", S[i])
+        end
+    end
+
+    return U[:, 1:k], S[1:k], V[:, 1:k]
+end
+
+
+# ---------------------------------------------------------------
+# EXAMPLE: forcing as a single node in the mesh
+# ---------------------------------------------------------------
+"""
+    point_force(mesh, xref; amp=1.0)
+
+Generate a forcing vector F̂ applied at the node nearest to the physical position `xref`.
+Uses the `points` field of the mesh for coordinates.
+"""
+
+function point_force(mesh, xref; amp=1.0)
+    coords = mesh.points # Extract mesh coordinates
+    dists = [abs(coords[i][1] - xref) for i in 1:length(coords)] # Compute distances from xref to each mesh point, coords[i][1] extracts x-coordinate
+    idx = argmin(dists) # Find index of closest mesh point to xref
+    F = zeros(ComplexF64, length(coords)) # Initialize forcing vector
+    F[idx] = amp + 0im # Apply forcing at the closest node
+    return F, idx # Return forcing vector and index of application
+end
+
