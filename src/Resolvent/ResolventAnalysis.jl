@@ -276,3 +276,5 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs;
         error("Unknown mode: $mode")
     end
 end
+
+end # module
