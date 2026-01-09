@@ -129,7 +129,6 @@ end
 # - `L`        : Resolvent operator function, callable as `L(ω)`
 # - `coords`   : Node coordinates (matrix, nodes × dimensions)
 # - `node_idx` : Node index to map
-# - `field`    : Field type (:pressure or :velocity) to select DOF offset
 # - `dof_per_node`: Number of DOFs per node (default 1)
 # Returns:
 # - `dof_idx`  : Corresponding DOF index in L
