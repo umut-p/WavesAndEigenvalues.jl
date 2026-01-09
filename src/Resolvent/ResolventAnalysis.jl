@@ -18,7 +18,6 @@ function compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
     p̂ = nothing # Initialize response vector
     success = false # Flag for successful solve
     resid = NaN # Residual norm
-
     # First try direct solve
     try
         p̂ = A \ F # Direct solve ̂p = L(ω)^(-1) * F
@@ -28,9 +27,7 @@ function compute_resolvent(L, ω0, F; tol=1e-8, maxiter=200, output=true)
         if output
             @warn "Direct solve failed. Error: $err_direct"
         end
-        
     end
-
     return p̂, (success=success, resid=resid, ω0=ω0)
 end
 """
@@ -43,7 +40,6 @@ It measures how strongly the system amplifies the input at a given frequency �
 A high resolvent norm at a given frequency means the system is very sensitive to the forcing at that frequency —
 a remark of potential resonance or instability.
 """
-
 function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
     A = L(ω0) # Resolvent operator at frequency ω₀
     n = size(A, 1) # Dimension of the operator
@@ -79,7 +75,6 @@ function resolvent_norm(L, ω0; tol=1e-8, maxiter=1000)
 
     return σ # Return estimated resolvent norm
 end
-
 """
     resolvent_svd(L, ω0; k=5, output=true)
 Compute the top `k` singular values and corresponding left/right singular vectors of the resolvent operator L(ω₀) at frequency ω₀.
@@ -87,35 +82,45 @@ arguments:
 - `L`        : Resolvent operator function, callable as `L(ω)`
 - `ω0`       : Frequency at which to evaluate the resolvent operator
 - `k`        : Number of top singular values/vectors to compute (default 5)
-- `output`   : Whether to print the singular values (default true)
+- `output`   : Whether to print the singular values 
 Returns:
-- `U`        : Matrix of left singular vectors (response modes)
-- `S`        : Vector of singular values
-- `V`        : Matrix of right singular vectors (forcing modes)
+- f : Optimal forcing vector (left singular vector)
+- σ_old : Dominant singular value (largest singular value)
 """
-function resolvent_svd(L, ω0; k=5, output=true)
-    A = L(ω0)              # Resolvent operator at frequency ω₀
-    n = size(A,1)          # Dimensions of the operator L(ω₀)
+function resolvent_svd(L, ω; maxiter=50, tol=1e-6)
+    A = L(ω)
+    n = size(A, 1)
 
-    # Generate random input matrix
-    X = randn(ComplexF64, n, k) # Random complex forcing vectors
-    
-    # Apply resolvent to each column of X
-    Y = zeros(ComplexF64, n, k) # Initialize response matrix
-    for j in 1:k # Loop over each forcing vector
-        Y[:, j] = A \ X[:, j] # Compute response for each forcing vector
-    end
+    # LU decompositions for efficient solves
+    F = lu(A)
 
-    # Perform SVD on response matrix
-    SVD = svd(Y) # SVD decomposition of response matrix Y
-    U, S, V = SVD.U, SVD.S, SVD.V # Extract U, S, V from SVD
-    if output
-        println("→ Top $k singular values of resolvent operator at $(ω0 / (2π)) Hz:")
-        for i in 1:k 
-            println("   σ[$i] ≈ ", S[i]) # Print top k singular values
+    # random initial forcing vector
+    f = randn(ComplexF64, n)
+    f ./= norm(f)
+
+    σ_old = 0.0
+    for iter in 1:maxiter
+        # apply resolvent: p = A \ f
+        p = F \ f
+
+        # singular value estimate
+        σ = norm(p)
+
+        # normalize response
+        p ./= σ
+
+        # next forcing vector = adjoint resolvent applied to p
+        f = A' \ p
+        f ./= norm(f)
+
+        # convergence check
+        if abs(σ - σ_old) < tol
+            break
         end
+        σ_old = σ
     end
-    return U[:, 1:k], S[1:k], V[:, 1:k] # Return top k singular vectors and values
+
+    return f, σ_old   # optimal forcing, dominant singular value
 end
 
 """ Given a node index, map it to the corresponding DOF index in the operator L.
@@ -131,53 +136,9 @@ end
 # Example:
 # dof_idx = node_to_dof_index(L, coords, 10; field=:pressure, dof_per_node=2)
 # This maps node index 10 to the pressure DOF index in L, assuming 2 DOFs per node (pressure and velocity).
-"""
-function node_to_dof_index(L, coords, node_idx; field::Symbol=:pressure, dof_per_node::Int=1)
-    A_example = L(2π*100.0)
-    nDOF = size(A_example, 1)
-    nNodes = size(coords, 1)
-
-    if nDOF == nNodes
-        # 1 DOF per node → trivial mapping
-        return node_idx
-    elseif nDOF == nNodes * dof_per_node
-        # multiple DOFs per node → choose offset based on field
-        if field == :pressure
-            return node_idx
-        else
-            error("Unknown field: $field")
-        end
-    else
-        error("Cannot map node index to DOF index automatically. Check L and coords.")
-    end
-end
-"""
-    compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm)
-
-General routine to compute system responses for a set of forcing locations.
-Arguments:
-- `L`            : Resolvent operator function, callable as `L(ω)`
-- `coords`       : Node coordinates (matrix, nodes × dimensions)
-- `axis`         : Axis index (e.g. 1 for x, 2 for y, 3 for z)
-- `forcing_fracs`: Array of fractions along duct length (0–1)
-- `freqs`        : Array of frequencies in Hz
-- 'fields'      : Field type (:pressure or :velocity) to select DOF offset
-- `mode`         
-        :norm` → compute max resolvent norm (global gain),
-          -> Uses resolvent_norm to compute global gain at each frequency
-          -> Returns array of resolvent norms per frequency
-        :local` → compute local amplitude curve at forcing DOF
-          -> Uses compute_resolvent to solve for each frequency and forcing location 
-          -> Returns dictionary mapping forcing fraction → amplitude response array
-        :forcing_norm` → computes max response norm across freqs for each forcing location
-          -> Uses compute_resolvent to solve for each frequency and forcing location 
-          -> Returns max response norms per forcing location         
-        :svd` → Dictionary of SVD results (U, S, V) per frequency
-          -> Uses resolvent_svd to compute top singular values/vectors at each frequency
-          -> Returns dictionary mapping frequency → (U, S, V) tuples
-"""         
+"""    
 function compute_responses(L, coords, axis, forcing_fracs, freqs;
-                           mode=:norm, field=:pressure)
+                           mode=:norm)
     axmin, axmax = minimum(coords[:,axis]), maximum(coords[:,axis]) # Duct length along specified axis
 
     if mode == :norm
@@ -261,17 +222,6 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs;
             next!(outer)
         end
         return responses
-
-    elseif mode == :svd # Dictionary of SVD results (U, S, V) per frequency
-        svd_results = Dict{Float64, Tuple{Matrix{ComplexF64}, Vector{Float64}, Matrix{ComplexF64}}}()
-        prog = Progress(length(freqs), desc="SVD frequencies")
-        for f in freqs
-            ω = 2π*f
-            U, S, V = resolvent_svd(L, ω; k=5, output=false) # Compute SVD at frequency ω for top 5 modes
-            svd_results[f] = (U, S, V) # Store results in dictionary
-            next!(prog)
-        end
-        return svd_results
     else
         error("Unknown mode: $mode")
     end
