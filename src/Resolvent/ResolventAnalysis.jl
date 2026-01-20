@@ -119,8 +119,8 @@ function resolvent_svd(L, ω; maxiter=50, tol=1e-6)
             return f, zeros(ComplexF64, n), 0.0
         end
         # update forcing f = (A')^{-1} p
-        p ./= σ # normalize response p = p / σ
-        f = PluT \ p # solve adjoint system
+        p ./= σ # normalize response p = L(ω)⁻¹ f / ‖L(ω)⁻¹‖₂
+        f = PluT \ p # solve adjoint system f = LU(L(ω)')⁻¹ p
         f ./= norm(f) # normalize forcing f = f / ‖f‖
         
         if abs(σ - σ_prev) < tol * max(1.0, σ) # convergence check if change in σ is small enough
@@ -134,9 +134,9 @@ function resolvent_svd(L, ω; maxiter=50, tol=1e-6)
     if σ == 0 # avoid division by zero
         u_opt = zeros(ComplexF64, n)
     else
-        u_opt = u_raw / σ         # normalized response (unit gain) where σ= ‖L(ω)⁻¹‖₂. u_opt = p / σ
+        u_opt = u_raw / σ         # normalized response (unit gain): u_opt = L(ω)⁻¹ f_opt / ‖L(ω)⁻¹‖₂ 
     end
-    return f_opt, u_opt, σ # return optimal forcing, response, and singular value
+    return f_opt, u_opt, σ # return optimal forcing, optimal response, and singular value
 end
 """
     compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm)
