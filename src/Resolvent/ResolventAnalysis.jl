@@ -1,4 +1,5 @@
 module Resolvent
+export apply_resolvent, resolvent_norm, local_resolvent_gain, resolvent_svd, compute_responses, patch_pressure_dofs, best_matching_mode, compare_popt_with_eigenmode, speaker_patch_forcing, speaker_scan
 
 include("Utils.jl")
 # using LinearAlgebra, ProgressMeter, SparseArrays, Plots, Statistics, Optim
