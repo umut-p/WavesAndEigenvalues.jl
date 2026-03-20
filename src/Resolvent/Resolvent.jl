@@ -94,8 +94,7 @@ end
 - `B`: injects a reduced forcing vector into full DOFs at `in_dofs`
 - `E`: extracts response DOFs at `out_dofs`
 
-# Implementation: 
-Power iteration on `T*T` using alternating solves with `L(ω)` and `L(ω)'`.
+Implementation: power iteration on `T*T` using alternating solves with `L(ω)` and `L(ω)'`.
 Pass in `Plu = lu(L(ω))` and `PluH = lu(L(ω)')` where Plu is the LU factorization of L(ω) and PluH is the LU factorization of L(ω)'.
 """
 function local_resolvent_gain(Plu, PluH, n::Integer,
@@ -238,8 +237,10 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
             # find all nodes within radius, the distance from the target coordinate to all nodes along the specified axis
             d = abs.(coords[:,axis] .- target) # distance from the target coordinate to all nodes along the specified axis
             idxs = findall(d .≤ radius) # find all nodes within radius
-            if isempty(idxs) # if no nodes are found within radius, warn and continue
-                @warn "No nodes found within radius for frac=$frac (target=$target)"
+            # Don't return an empty patch
+            if isempty(idxs)
+                @warn "No nodes found within radius for frac=$frac (target=$target); using nearest node"
+                idxs = [argmin(d)]
             end
             nodes_list[i] = idxs # store node indices for this forcing fraction
             # convert node indices → DOF indices
@@ -293,29 +294,30 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
             amps = zeros(ComplexF64, length(freqs), outcols)
             inner = Progress(length(freqs), desc="Forcing location $(round(frac; digits=2))L", barlen=20)
 
-            F = zeros(ComplexF64, ndof)
+            # Batched RHS: one column per patch DOF (unit forcing). Same B for all ω at this location.
+            B = zeros(ComplexF64, ndof, k_here)
+            for j in 1:k_here # loop over nodes in the patch
+                B[dofs[j], j] = 1 + 0im # set the forcing vector at the DOFs of the node to 1 + 0im, B =
+            end
 
             for (i_f, f) in enumerate(freqs) # loop over frequencies
-                ω = 2π*f
-                A = L(ω) 
+                ω = 2π*f # angular frequency
+                A = L(ω) # resolvent operator
                 Plu = lu(A)  # LU factorization for efficient solves
-                fill!(F, 0)  # reset forcing vector
+                # Single multi-RHS backsolve 
+                P = Plu \ B # solve for the response P = L(ω)⁻¹ B
 
-                # loop over all DOFs in the forcing patch
-                for (jnode, d) in enumerate(dofs) # for each DOF in the forcing patch
-                    F[d] = 1 + 0im  # unit forcing at this DOF
-                    p̂ = Plu \ F     # solve for response p̂ = L(ω)⁻¹ F
-                    F[d] = 0        # reset forcing for next DOF
-
-                    # extract all DOFs of this node
+                # Extract responses for each node in the patch
+                for jnode in 1:k_here # loop over nodes in the patch
+                    d = dofs[jnode] # DOF index of the node
                     base = (d - offset) ÷ dof_per_node     # base node index (0-based)
                     start_dof = base * dof_per_node + offset # start DOF index for this node
                     stop_dof  = start_dof + dof_per_node - 1 # stop DOF index for this node
 
-                    col_start = (jnode - 1) * blocksize + 1 # start column in amps, col_start is the start column in the response matrix
-                    col_end   = jnode * blocksize # end column in amps, col_end is the end column in the response matrix
+                    col_start = (jnode - 1) * blocksize + 1 # start column index for this node
+                    col_end   = jnode * blocksize # end column index for this node
 
-                    amps[i_f, col_start:col_end] = p̂[start_dof:stop_dof] # create response matrix by storing all DOFs of this node
+                    amps[i_f, col_start:col_end] = P[start_dof:stop_dof, jnode] # store the response at the DOFs of the node in the response matrix
                 end
 
                 next!(inner, showvalues = [(:freq, f)]) # update inner progress with current frequency
@@ -341,7 +343,6 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
     end
     error("Unknown mode: $mode") # error if the mode is unknown
 end
-
 """
     patch_pressure_dofs(coords, axis, frac, dof_per_node; radius_mm, offset=1)
 Finds pressure DOFs in a small patch around a given forcing location.
@@ -375,179 +376,36 @@ function patch_pressure_dofs(coords, axis, frac, dof_per_node; radius_mm=0.1, of
 end
 
 """
-    best_matching_mode(p_num, Ldom_sorted, max_modes)
-Finds the best matching analytical mode index based on correlation with the numerical mode.
-Parameters:
-- `p_num` : Numerical pressure distribution
-- `Ldom_sorted` : Sorted domain length
-- `max_modes` : Maximum number of modes to consider
-Returns:
-- `best_k` : Best matching analytical mode index
-- `best_corr` : Correlation between the optimal response and the analytical eigenmode
-Helper Functions:
-- `cos` : Cosine function
-- `dot` : Dot product
-- `norm` : Norm
-"""
-function best_matching_mode(p_num, Ldom_sorted, max_modes)
-    best_corr = -Inf
-    best_k = 1
-    for n in 1:max_modes
-        p_ana = @. cos((2*n - 1) * 0.5 * π * Ldom_sorted) # analytical mode shape for mode index n
-        α = dot(p_ana, p_num) / dot(p_ana, p_ana) # optimal scaling factor to match numerical mode
-        p_ana_scaled = α .* p_ana # scale analytical mode to best match numerical one
-        corr = dot(p_ana_scaled, p_num) / (norm(p_ana_scaled) * norm(p_num)) # correlation with scaled analytical mode
-        if corr > best_corr
-            best_corr = corr
-            best_k = n
-        end
-    end
-    return best_k, best_corr
-end
+    speaker_patch_forcing(coords, axis, wall_nodes, center_x, radius_mm, dof_per_node, patch_area_m2)
 
-"""
-    compare_popt_with_eigenmode(k::Int)
-Compares the optimal response with the analytical eigenmode for a given resonance frequency.
-Parameters:
-- `k` : Resonance index
-Returns:
-- `plt` : Plot of the optimal response vs the analytical eigenmode
-- `ρ` : Correlation between the optimal response and the analytical eigenmode
-- `r` : Residual between the optimal response and the analytical eigenmode
-Helper Functions:
-- `best_matching_mode` : Finds the best matching mode index based on correlation with numerical mode
-"""
-function compare_popt_with_eigenmode(k::Int)
-    f = freqs[k]
-
-    # --- SVD optimal response ---
-    f_opt, p_opt, σ = svd_result[f]
-
-    # extract pressure DOFs
-    p_opt_p = zeros(ComplexF64, nNodes)
-    for i in 1:nNodes # loop over nodes to extract pressure DOFs
-        dof = (i - 1)*dof_per_node + 1
-        p_opt_p[i] = p_opt[dof]
-    end
-
-    # sort along x
-    p_sorted = p_opt_p[perm]
-
-    # phase align
-    phase = angle(p_sorted[1]) # align phase to first point (x=0) to ensure consistent sign across frequencies
-    p_sorted .*= exp(-1im * phase)
-    p_num = real.(p_sorted)
-
-    # --- analytical eigenmode ---
-    nstar, _corr = best_matching_mode(p_num, Ldom_sorted, length(resonances))
-    p_ana = @. Base.cos((2*nstar - 1) * 0.5 * π * Ldom_sorted)
-
-    # scale analytical mode to best match numerical one
-    α = LinearAlgebra.dot(p_ana, p_num) / LinearAlgebra.dot(p_ana, p_ana)
-    p_ana_scaled = α .* p_ana
-
-    # --- normalize both to unit max amplitude ---
-    p_num_norm = p_num ./ maximum(abs.(p_num))
-    p_ana_norm = p_ana_scaled ./ maximum(abs.(p_ana_scaled))
-
-    # consistent sign for each graph ---
-    s = Base.sign(p_num_norm[1]) # If the dot product is positive, they are mostly aligned; if negative, they are mostly opposite. This gives us a sign factor to align them.
-    if s == 0 # if they are orthogonal, just set s to 1 to avoid zeroing out the modes
-        s = 1.0 # this means we keep the original sign of the numerical mode if they are orthogonal
-    end
-    p_num_norm = p_num_norm .* s # align sign of numerical mode with analytical mode
-    p_ana_norm = p_ana_norm .* s # align sign of analytical mode with numerical mode
-
-    # --- correlation and residual (use normalized fields) ---
-    ρ = LinearAlgebra.dot(p_ana_norm, p_num_norm) / (LinearAlgebra.norm(p_ana_norm) * LinearAlgebra.norm(p_num_norm))
-    r = LinearAlgebra.norm(p_num_norm - p_ana_norm) / LinearAlgebra.norm(p_num_norm)
-
-    # --- dynamic y-limits (per k) ---
-    ymin = Base.min(Base.minimum(p_num_norm), Base.minimum(p_ana_norm))
-    ymax = Base.max(Base.maximum(p_num_norm), Base.maximum(p_ana_norm))
-    yrange = ymax - ymin
-    pad = (yrange == 0.0) ? 1e-6 : 0.05 * yrange # small margin to avoid y-axis being too tight
-    ylims_dynamic = (ymin - pad, ymax + pad)
-
-    plt = Plots.plot(
-        Ldom_sorted, p_num_norm,
-        lw = 2,
-        label = "p_opt(x) at $(Base.round(f; digits=1)) Hz",
-        xlabel = "x/L",
-        ylabel = "Normalized amplitude ||p||",
-        title = "Optimal response vs scaled eigenmode at $(Base.round(f; digits=1)) Hz",
-        size = (900, 600),
-        ylims = ylims_dynamic,
-    )
-
-    Plots.plot!(
-        plt,
-        Ldom_sorted, p_ana_norm,
-        lw = 2,
-        ls = :dash,
-        label = "Scaled analytical mode n=$nstar (r=$(Base.round(r; digits=3)))"
-    )
-
-    Plots.hline!([0], ls=:dash, color=:green, lw=0.8, label="")
-
-    return plt, ρ, r
-end
-
-"""
-    speaker_patch_forcing(coords, axis, wall_nodes, center_x, radius_mm, dof_per_node)
 Computes the forcing vector for a speaker patch at a given center location.
-Parameters:
-- `coords` : Coordinates of the nodes
-- `axis` : Axis along which the speaker is placed
-- `wall_nodes` : List of wall node indices
-- `center_x` : Center location of the speaker patch
-- `radius_mm` : Radius of the speaker patch in mm
-- `dof_per_node` : Number of DOFs per node
-Returns:
-- `f` : Forcing vector
-Helper Functions:
-- `π` : Pi
-- `^` : Power
-- `÷` : Division
-- `zeros` : Zeros
-- `length` : Length
+`patch_area_m2` is the nominal patch area (m²); it is distributed approximately over `wall_nodes` for scaling.
 """
-function speaker_patch_forcing(coords, axis, wall_nodes, center_x, radius_mm, dof_per_node)
+function speaker_patch_forcing(coords, axis, wall_nodes, center_x, radius_mm, dof_per_node, patch_area_m2::Real)
     radius = radius_mm / 1000.0 # convert radius from mm to m
-    nNodes = size(coords, 1) # number of nodes 
-    ndof   = nNodes * dof_per_node # total number of DOFs
-    dof_per_node = ndof ÷ nNodes # DOFs per node
+    nNodes = size(coords, 1) # number of nodes
+    ndof = nNodes * dof_per_node # total number of DOFs
+    dof_pn = ndof ÷ nNodes # DOFs per node
     f = zeros(ndof) # initialize forcing vector
+    n_wall = length(wall_nodes)
+    area_node = patch_area_m2 / max(n_wall, 1) # approximate area share per wall node
 
-    for node in wall_nodes # for each wall node
-        dof_per_node = ndof ÷ nNodes # DOFs per node
-        x = coords[node, axis] # coordinate along specified axis of this node
-        if abs(x - center_x) <= radius # check if within speaker patch radius
-            dof = (node - 1) * dof_per_node + 1  # pressure DOF index for this node
-            area_node = area / length(wall_nodes) # approximate area per wall node
-            f[dof] = 1.0 * area_node # pressure forcing scaled by area
+    for node in wall_nodes
+        x = coords[node, axis]
+        if abs(x - center_x) <= radius
+            dof = (node - 1) * dof_pn + 1  # pressure DOF index for this node
+            f[dof] = 1.0 * area_node
         end
     end
-    return f # return forcing vector
+    return f
 end
+
 """
-    speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm)
-Performs a speaker scan along the wall to find the optimal speaker location.
-Parameters:
-- `L_flame` : Linear operator for the flame
-- `coords` : Coordinates of the nodes
-- `axis` : Axis along which the speaker is placed
-- `start_x` : Starting location of the speaker scan
-- `end_x` : Ending location of the speaker scan
-- `spacing` : Spacing between speaker locations
-- `radius_mm` : Radius of the speaker patch in mm
-Returns:
-- `speaker_centers` : Locations of the speaker centers
-- `resp_norms` : Norms of the responses at each speaker location
-- `responses` : Responses at each speaker location
-- `dof_per_node` : Number of DOFs per node
+    speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm, patch_area_m2=nothing)
+
+`patch_area_m2` defaults to π (radius_m)² if not given.
 """
-function speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm)
+function speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm, patch_area_m2=nothing)
     # get wall nodes from mesh boundaries
     nNodes     = size(coords, 1) # number of nodes
     ndof = size(L_flame(2π*freqs[1]), 1) # number of DOFs
@@ -556,13 +414,15 @@ function speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm)
     speaker_centers = collect(start_x : spacing : end_x) # speaker center locations along axis starts from start_x to end_x with given spacing
     Nspeaker = length(speaker_centers)
 
+    area_m2 = something(patch_area_m2, π * (radius_mm / 1000.0)^2)
+
     # Build operator at this frequency to infer ndof
     pbar = Progress(length(freqs), desc="Speaker scan frequencies")
     responses  = [Vector{Vector{ComplexF64}}(undef, Nfreq) for _ in 1:Nspeaker]
     resp_norms = [Vector{Float64}(undef, Nfreq) for _ in 1:Nspeaker]
 
     # Precompute forcing vectors
-    forcing_vectors = [speaker_patch_forcing(coords, axis, wall_nodes, xc, radius_mm, dof_per_node)
+    forcing_vectors = [speaker_patch_forcing(coords, axis, wall_nodes, xc, radius_mm, dof_per_node, area_m2)
         for xc in speaker_centers] # precompute forcing vectors for each speaker center location
 
     # Initialize response storage 
