@@ -89,7 +89,8 @@ end
 
 "Local resolvent gain" as a *restricted* 2-norm gain:
 
-    gain(ω) = || E * L(ω)^(-1) * B ||₂
+    gain(ω) = || E * L(ω)^(-1) * B ||₂ : direct solve
+    gain(ω) = || B' * (L(ω)'^-1 * (E' y)) ||₂ : adjoint solve
 
 - `B`: injects a reduced forcing vector into full DOFs at `in_dofs`
 - `E`: extracts response DOFs at `out_dofs`
@@ -106,40 +107,34 @@ function local_resolvent_gain(Plu, PluH, n::Integer,
         return 0.0
     end
 
-    # Work vectors to avoid allocations in the iteration
+    # Below function does: y=EL^-1Bg, and σ=‖y‖ and g_new ∝ T' y = B' * (L(ω)'^-1 * (E' y)): direct and adjoint solves.
     f_full = zeros(ComplexF64, n)      # full forcing
     rhs_full = zeros(ComplexF64, n)    # full RHS for adjoint solve (E' y)
     g = randn(ComplexF64, nin) # initial random forcing vector, size: nin
-    g ./= norm(g) # normalize the initial forcing vector
+    g ./= norm(g) # normalize the initial forcing vector, g = g / norm(g)
     σ_prev = 0.0 # initialize previous singular value
     for _ in 1:maxiter # loop over maximum number of iterations
         fill!(f_full, 0) # reset forcing vector
-        @inbounds f_full[in_dofs] .= g # inject the forcing vector into the full DOFs at in_dofs, inbounds is used to avoid bounds checking
-        p = Plu \ f_full # solve for response p = L(ω)⁻¹ f
-        y = @view p[out_dofs] # extract the response at the out_dofs
-        σ = norm(y) # estimate singular value ‖L(ω)⁻¹‖₂ -> σ = ‖L(ω)⁻¹‖₂
-        if σ < eps()  #
+        @inbounds f_full[in_dofs] .= g # f_full is the forcing vector at the in_dofs, inbounds is used to avoid bounds checking
+        p = Plu \ f_full # solve for response p = L(ω)⁻¹ f_full, this is the response of the system to the forcing at the in_dofs.
+        y = @view p[out_dofs] # extract the response at the out_dofs, p is the response of the system to the forcing at the in_dofs.
+        σ = norm(y) # estimate singular value ‖L(ω)⁻¹‖₂ -> σ = ‖L(ω)⁻¹‖₂, this measures the amplification of the system at the out_dofs.
+        if σ < eps()  # avoid division by zero if σ is too small
             return 0.0 # avoid division by zero
         end
 
-        # g_new ∝ T' y = B' * (A' \ (E' y))
+        # Following does: g_new ∝ T' y = B' * (L(ω)'^-1 * (E' y))
         fill!(rhs_full, 0) # reset RHS vector with zeros
-        @inbounds rhs_full[out_dofs] .= y ./ σ # inject the response at the out_dofs into the RHS vector with the scaling factor σ. 
-                                               # This is the response of the system to the forcing at the out_dofs. The response is scaled by the scaling factor σ.
-                                               # inbounds is used to avoid bounds checking
-        w = PluH \ rhs_full # solve for w = L(ω)⁻¹ y using the LU factorization of L(ω)'. This is the response of the system to the forcing at the out_dofs.
-        g_new = @view w[in_dofs] # extract the forcing vector at the in_dofs, view is used to avoid copying the data
-        gnorm = norm(g_new) # estimate singular value ‖L(ω)⁻¹‖₂ -> gnorm = ‖L(ω)⁻¹‖₂, this is the norm of the forcing vector at the in_dofs.
-        if gnorm < eps() # avoid division by zero
-            return σ # return the singular value if the norm is too small
-        end
-        g .= g_new ./ gnorm # normalize the forcing vector
+        @inbounds rhs_full[out_dofs] .= y ./ σ # inject the response at the out_dofs(y/σ) into the RHS vector with the scaling factor σ.
+        w = PluH \ rhs_full # solve for w = L(ω)'⁻¹ (B'y/σ) using the LU factorization of L(ω)'. This is the forcing vector at the in_dofs.
+        g_new = @view w[in_dofs] # extract the forcing vector at the in_dofs, w is the forcing vector at the in_dofs.
+        g .= g_new ./ norm(g_new) # normalize the forcing vector, g = g_new / norm(g_new)
         if abs(σ - σ_prev) < tol * max(1.0, σ) # convergence check if change in σ is small enough
             return σ # return the singular value if the change is small enough
         end
         σ_prev = σ # update previous estimate
     end
-    return σ_prev # return the last estimate if the maximum number of iterations is reached
+    return σ # return the singular value
 end
 
 
@@ -163,26 +158,21 @@ function resolvent_svd(L, ω; maxiter=50, tol=1e-6)
     Plu  = lu(A)                   # LU factorization of L(ω)
     PluT = lu(A')                  # LU factorization of L(ω)'
     f = randn(ComplexF64, n)       # initial forcing
-    f ./= norm(f)
+    f ./= norm(f) # normalize the initial forcing vector, f = f / norm(f)
     σ_prev = 0.0
     σ = 0.0
-    p = zeros(ComplexF64, n)       #
+    p = zeros(ComplexF64, n)       # initialize response vector
 
     for i in 1:maxiter
         # forward solve: p = L(ω)^(-1) f
-        p = Plu \ f # solve for response p = L(ω)⁻¹ f, this is the response vector p.
-        σ = norm(p) # estimate singular value ‖L(ω)⁻¹‖₂ -> σ = ‖L(ω)⁻¹‖₂, this is the singular value of the response vector p.
-
-        # guard against zero/very small σ
-        if σ ≤ eps() # avoid division by zero if σ is too small
-            @warn "resolvent_svd: singular value too small at iteration $i"
-            return f, zeros(ComplexF64, n), 0.0
+        p = Plu \ f # solve for response p = L(ω)⁻¹ f : direct solve, this is the response vector p.
+        σ = norm(p) # estimate singular value ‖L(ω)⁻¹‖₂ -> σ = ‖L(ω)⁻¹‖₂, this measures the amplification of the system at the out_dofs.
+        if σ < eps() # avoid division by zero if σ is too small
+            return f, zeros(ComplexF64, n), 0.0 # return zero forcing, response, and singular value if σ is too small
         end
-        # normalize response and update forcing via adjoint, this is the forcing vector f.
         p ./= σ # normalize response p = L(ω)⁻¹ f / ‖L(ω)⁻¹‖₂
-        f = PluT \ p # solve for forcing f = L(ω)'⁻¹ p, this is the forcing vector f.
-        f ./= norm(f) # normalize forcing f = f / ‖f‖  , this is the normalized forcing vector f.
-
+        f = PluT \ p # solve for forcing f = L(ω)'⁻¹ p : adjoint solve, this is the forcing vector f.
+        f ./= norm(f) # normalize forcing f = f / ‖f‖  
         if abs(σ - σ_prev) < tol * max(1.0, σ) # convergence check if change in σ is small enough
                                                # max(1.0, σ) gives relative tolerance when σ is large
             break # break the loop if the change in σ is small enough
@@ -222,25 +212,23 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
     - nodes_list : List of vectors of node indices for each forcing fraction
     - dofs_list  : List of vectors of DOF indices for each forcing fraction
     """
-    function nearest_nodes_and_dofs(coords, axis, forcing_fracs, nNodes, dof_per_node;
-                                radius_mm=1.0, offset=1)
+    function nearest_nodes_and_dofs(coords, axis, forcing_fracs, dof_per_node;
+                                radius_mm=radius_mm, offset=offset)
         m = length(forcing_fracs) # number of forcing fractions
         axmin, axmax = minimum(coords[:,axis]), maximum(coords[:,axis]) # minimum and maximum coordinates along the specified axis
-
+        radius = radius_mm / 1000.0   # convert mm → m, radius in meters
         nodes_list = Vector{Vector{Int}}(undef, m) # list of node indices for each forcing fraction
         dofs_list  = Vector{Vector{Int}}(undef, m) # list of DOF indices for each forcing fraction
 
-        radius = radius_mm / 1000.0   # convert mm → m, radius in meters
         for (i, frac) in enumerate(forcing_fracs) # loop over forcing fractions
             # target coordinate along chosen axis   
             target = axmin + frac*(axmax - axmin) # target coordinate along the specified axis
-            # find all nodes within radius, the distance from the target coordinate to all nodes along the specified axis
             d = abs.(coords[:,axis] .- target) # distance from the target coordinate to all nodes along the specified axis
-            idxs = findall(d .≤ radius) # find all nodes within radius
+            idxs = findall(d .≤ radius) # find all nodes within radius 
             # Don't return an empty patch
             if isempty(idxs)
                 @warn "No nodes found within radius for frac=$frac (target=$target); using nearest node"
-                idxs = [argmin(d)]
+                idxs = [argmin(d)] # use the nearest node if no nodes are found within radius
             end
             nodes_list[i] = idxs # store node indices for this forcing fraction
             # convert node indices → DOF indices
@@ -268,7 +256,7 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
         prog = Progress(length(freqs), desc="Resolvent norm")
         for f in freqs
             ω = 2π*f # angular frequency
-            push!(norms, resolvent_norm(L, ω)) # compute and store resolvent norm at this frequency ω
+            push!(norms, resolvent_norm(L, ω)) # compute and store resolvent norm at this frequency ω, resolvent_norm(L, ω) = ‖L(ω)‖₂
             next!(prog)
         end
         return norms 
@@ -278,13 +266,13 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
     if mode == :local 
         # get nodes and DOFs inside radius for each forcing location
         nodes_list, dofs_list =
-            nearest_nodes_and_dofs(coords, axis, forcing_fracs, nNodes, dof_per_node;
-                                   radius_mm=radius_mm, offset=offset)
+            nearest_nodes_and_dofs(coords, axis, forcing_fracs, dof_per_node;
+                                   radius_mm=radius_mm, offset=offset) # get nodes and DOFs inside radius for each forcing location
 
         responses = Dict{Float64, Matrix{ComplexF64}}()
         outer = Progress(length(forcing_fracs), desc="Forcing locations")
 
-        for (i_target, frac) in enumerate(forcing_fracs)
+        for (i_target, frac) in enumerate(forcing_fracs) # loop over forcing fractions
 
             dofs = dofs_list[i_target]     # DOFs inside forcing patch
             k_here = length(dofs)          # number of forced nodes
@@ -295,9 +283,9 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
             inner = Progress(length(freqs), desc="Forcing location $(round(frac; digits=2))L", barlen=20)
 
             # Batched RHS: one column per patch DOF (unit forcing). Same B for all ω at this location.
-            B = zeros(ComplexF64, ndof, k_here)
+            B = zeros(ComplexF64, ndof, k_here) # initialize the forcing vector B, size: ndof × k_here
             for j in 1:k_here # loop over nodes in the patch
-                B[dofs[j], j] = 1 + 0im # set the forcing vector at the DOFs of the node to 1 + 0im, B =
+                B[dofs[j], j] = 1 + 0im # set the forcing vector at the DOFs of the node to 1 + 0im, B = [0, 0, ..., 1, 0, ..., 0]
             end
 
             for (i_f, f) in enumerate(freqs) # loop over frequencies
@@ -305,7 +293,7 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
                 A = L(ω) # resolvent operator
                 Plu = lu(A)  # LU factorization for efficient solves
                 # Single multi-RHS backsolve 
-                P = Plu \ B # solve for the response P = L(ω)⁻¹ B
+                P = Plu \ B # solve for the response P = L(ω)⁻¹ B at each frequency
 
                 # Extract responses for each node in the patch
                 for jnode in 1:k_here # loop over nodes in the patch
@@ -317,13 +305,14 @@ function compute_responses(L, coords, axis, forcing_fracs, freqs; mode=:norm,rad
                     col_start = (jnode - 1) * blocksize + 1 # start column index for this node
                     col_end   = jnode * blocksize # end column index for this node
 
-                    amps[i_f, col_start:col_end] = P[start_dof:stop_dof, jnode] # store the response at the DOFs of the node in the response matrix
+                    amps[i_f, col_start:col_end] = P[start_dof:stop_dof, jnode] # store the response at the DOFs of the node in the response matrix, P is the response matrix.
+                    # P is the response matrix, size: ndof × k_here, P[start_dof:stop_dof, jnode] is the response at the DOFs of the node. 
                 end
 
                 next!(inner, showvalues = [(:freq, f)]) # update inner progress with current frequency
             end
 
-            responses[frac] = amps # store response matrix for this forcing location
+            responses[frac] = amps # store response matrix for this forcing location -> p = L(ω)⁻¹ B at each frequency and forcing location
             next!(outer)
         end
 
@@ -346,13 +335,6 @@ end
 """
     patch_pressure_dofs(coords, axis, frac, dof_per_node; radius_mm, offset=1)
 Finds pressure DOFs in a small patch around a given forcing location.
-Parameters:
-- `coords` : Coordinates of the nodes
-- `axis` : Axis along which to find the pressure DOFs
-- `frac` : Fraction of the duct length along the specified axis
-- `dof_per_node` : DOFs per node
-- `radius_mm` : Radius of the patch in millimeters
-- `offset` : Offset of the pressure DOFs
 Returns:
 - `idxs` : Indices of the pressure DOFs in the patch
 # Implementation example:
@@ -377,6 +359,15 @@ end
 
 """
     speaker_patch_forcing(coords, axis, wall_nodes, center_x, radius_mm, dof_per_node, patch_area_m2)
+Input:
+- `coords` : Node coordinates array (nNodes × 3)
+- `axis` : Axis index along which to define forcing locations (1=x, 2=y, 3=z)
+- `wall_nodes` : Indices of the wall nodes
+- `center_x` : Center location along the specified axis (x, y, or z)
+- `radius_mm` : Radius (in mm) around the center location to include nodes
+- `dof_per_node` : DOFs per node
+- `patch_area_m2` : Nominal patch area (m²); it is distributed approximately over `wall_nodes` for scaling
+Output:
 
 Computes the forcing vector for a speaker patch at a given center location.
 `patch_area_m2` is the nominal patch area (m²); it is distributed approximately over `wall_nodes` for scaling.
@@ -387,58 +378,100 @@ function speaker_patch_forcing(coords, axis, wall_nodes, center_x, radius_mm, do
     ndof = nNodes * dof_per_node # total number of DOFs
     dof_pn = ndof ÷ nNodes # DOFs per node
     f = zeros(ndof) # initialize forcing vector
-    n_wall = length(wall_nodes)
-    area_node = patch_area_m2 / max(n_wall, 1) # approximate area share per wall node
 
-    for node in wall_nodes
-        x = coords[node, axis]
-        if abs(x - center_x) <= radius
-            dof = (node - 1) * dof_pn + 1  # pressure DOF index for this node
-            f[dof] = 1.0 * area_node
+    # Choose a wall-center node closest to requested axial location.
+    j_center = argmin([abs(coords[n, axis] - center_x) for n in wall_nodes]) # find the wall node closest to the center_x
+    center_node = wall_nodes[j_center] # get the wall node closest to the center_x
+    center_point = @view coords[center_node, :] # get the coordinates of the wall node closest to the center_x
+
+    # Build a circular patch (Euclidean radius) around the center point on wall nodes.
+    patch_nodes = Int[] # initialize patch nodes
+    r2 = radius^2 # square of the radius
+    for node in wall_nodes # loop over wall nodes
+        dx = coords[node, 1] - center_point[1] # distance between the wall node and the center_point along the x-axis
+        dy = coords[node, 2] - center_point[2] # distance between the wall node and the center_point along the y-axis
+        dz = coords[node, 3] - center_point[3] # distance between the wall node and the center_point along the z-axis
+        if (dx*dx + dy*dy + dz*dz) <= r2 # check if the wall node is inside the circular patch
+            push!(patch_nodes, node) # add the wall node to the patch nodes
         end
     end
-    return f
+    isempty(patch_nodes) && push!(patch_nodes, center_node) # add the center_node to the patch nodes if no wall nodes are found inside the circular patch
+
+    area_node = patch_area_m2 / length(patch_nodes) # distribute nominal patch area over selected nodes
+    for node in patch_nodes # loop over patch nodes
+        dof = (node - 1) * dof_pn + 1  # pressure DOF index for this node
+        f[dof] = area_node # set the forcing at the DOFs of the node to the area of the patch
+    end
+    return f # return the forcing vector
 end
 
 """
-    speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm, patch_area_m2=nothing)
+    speaker_scan(L_flame, coords, axis; wall_nodes, freqs, start_x, end_x, spacing, radius_mm, patch_area_m2=nothing) 
+    computes the response of the system to a speaker patch at a given center location.
 
-`patch_area_m2` defaults to π (radius_m)² if not given.
+    Parameters:
+    - `L_flame` : Resolvent operator function, callable as `L_flame(ω)`
+    - `coords` : Node coordinates array (nNodes × 3)
+    - `axis` : Axis index along which to define forcing locations (1=x, 2=y, 3=z)
+    - `wall_nodes` : Indices of the wall nodes
+    - `freqs` : List of frequencies (Hz) at which to compute responses
+    - `start_x` : Starting x-coordinate of the speaker patch
+    - `end_x` : Ending x-coordinate of the speaker patch
+    - `spacing` : Spacing between the speaker centers
+    - `radius_mm` : Radius (in mm) around each speaker center to include nodes (default 2.0 mm)
+    - `patch_area_m2` : Nominal patch area (m²); it is distributed approximately over `wall_nodes` for scaling (default π (radius_m)²)
+    Returns:
+    - `speaker_centers` : List of speaker center locations
+    - `resp_norms` : List of response norms at each frequency and speaker center
+    - `responses` : List of response matrices at each frequency and speaker center
+    - `dof_per_node` : DOFs per node
 """
-function speaker_scan(L_flame, coords, axis; start_x, end_x, spacing, radius_mm, patch_area_m2=nothing)
-    # get wall nodes from mesh boundaries
+function speaker_scan(L_flame, coords, axis; wall_nodes, freqs, start_x, end_x, spacing, radius_mm, patch_area_m2=nothing)
+    isempty(freqs) && throw(ArgumentError("speaker_scan: freqs must be non-empty"))
+    isempty(wall_nodes) && @warn "speaker_scan: wall_nodes is empty; all forcings will be zero."
+
     nNodes     = size(coords, 1) # number of nodes
     ndof = size(L_flame(2π*freqs[1]), 1) # number of DOFs
     dof_per_node = ndof ÷ nNodes # DOFs per node
-    Nfreq    = length(freqs)
+    Nfreq    = length(freqs) # number of frequencies
     speaker_centers = collect(start_x : spacing : end_x) # speaker center locations along axis starts from start_x to end_x with given spacing
-    Nspeaker = length(speaker_centers)
+    Nspeaker = length(speaker_centers) # number of speaker centers
+    isempty(speaker_centers) && throw(ArgumentError("speaker_scan: empty center range. Check start_x/end_x/spacing."))
 
-    area_m2 = something(patch_area_m2, π * (radius_mm / 1000.0)^2)
+    area_m2 = something(patch_area_m2, π * (radius_mm / 1000.0)^2) # area of the patch in square meters
 
-    # Build operator at this frequency to infer ndof
+    if isempty(wall_nodes) # if no wall nodes are found, print a warning
+        println("speaker_scan: |wall_nodes|=0; Nfreq=$Nfreq, Nspeaker=$Nspeaker, centers ∈ [$(first(speaker_centers)), $(last(speaker_centers))]")
+    else
+        wx = coords[wall_nodes, axis] # extract the x-coordinates of the wall nodes along the specified axis
+        println("speaker_scan: |wall_nodes|=$(length(wall_nodes)), wall axial span [$(minimum(wx)), $(maximum(wx))] m; Nfreq=$Nfreq, Nspeaker=$Nspeaker, centers ∈ [$(first(speaker_centers)), $(last(speaker_centers))]")
+    end
+
     pbar = Progress(length(freqs), desc="Speaker scan frequencies")
     responses  = [Vector{Vector{ComplexF64}}(undef, Nfreq) for _ in 1:Nspeaker]
     resp_norms = [Vector{Float64}(undef, Nfreq) for _ in 1:Nspeaker]
 
-    # Precompute forcing vectors
+    # Precompute forcing vectors for all speaker centers.
     forcing_vectors = [speaker_patch_forcing(coords, axis, wall_nodes, xc, radius_mm, dof_per_node, area_m2)
-        for xc in speaker_centers] # precompute forcing vectors for each speaker center location
+                       for xc in speaker_centers] 
+    n_zero = count(v -> iszero(norm(v)), forcing_vectors) # count the number of forcing vectors that are identically zero
+    n_zero > 0 && @warn "speaker_scan: $n_zero / $(length(forcing_vectors)) forcing vectors are identically zero."
+    unique_forcing_count = length(Set(map(v -> join(round.(v; digits=12), ","), forcing_vectors)))
+    println("speaker_scan: unique forcing vectors = $unique_forcing_count / $Nspeaker")
+    # print a warning if there are forcing vectors that are identically zero
 
-    # Initialize response storage 
-    for (i, f) in enumerate(freqs)
+    # Solve at each frequency for all speaker locations.
+    for (i, f) in enumerate(freqs) # loop over frequencies
         next!(pbar, ; showvalues=[(:freq_Hz, f)])
         ω = 2π * f
-        A = L_flame(ω)
-        Afact = lu(A)
-
-        # Solve for all speaker locations at this frequency
-        for s in 1:Nspeaker
-            p = Afact \ forcing_vectors[s]
-            responses[s][i]  = p
-            resp_norms[s][i] = norm(p)
+        A = L_flame(ω) # resolvent operator
+        Afact = lu(A) # LU factorization for efficient solves
+        for s in 1:Nspeaker # loop over speaker centers
+            p = Afact \ forcing_vectors[s] # solve for the response p = L(ω)⁻¹ B at each frequency and speaker center
+            responses[s][i]  = p # store the response at the DOFs of the node in the response matrix, p is the response matrix.
+            resp_norms[s][i] = norm(p) # store the response norm at each frequency and speaker center
         end
     end
 
-    return speaker_centers, resp_norms, responses, dof_per_node
+    return speaker_centers, resp_norms, responses, dof_per_node 
 end
